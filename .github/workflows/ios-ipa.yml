@@ -21,7 +21,7 @@ on:
 jobs:
   dsh-go:
     if: ${{ github.event_name == 'push' || inputs.build_dshgo }}
-    runs-on: macos-26
+    runs-on: macos-26-intel
     timeout-minutes: 90
     steps:
       - name: 拉取 DSH Go 源码
