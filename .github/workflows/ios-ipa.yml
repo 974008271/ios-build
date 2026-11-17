@@ -35,6 +35,7 @@ jobs:
         with:
           flutter-version: '3.47.7'
           channel: stable
+          cache: true
 
       - name: 准备本机引擎
         if: ${{ github.event_name == 'push' || !inputs.skip_engine }}
@@ -44,22 +45,71 @@ jobs:
         run: cd app && flutter pub get
 
       - name: 编译未签名 Release
-        run: cd app && bash ../tooling/ios/build.sh --release --no-codesign
+        id: compile
+        run: |
+          set +e
+          LOG="$GITHUB_WORKSPACE/ios-build.log"
+          cd app
+          bash ../tooling/ios/build.sh --release --no-codesign --verbose > "$LOG" 2>&1
+          st=$?
+          echo "=== flutter build 末尾 30 行 ==="
+          tail -30 "$LOG"
+          if [ "$st" -ne 0 ]; then
+            echo "=== flutter build 失败，错误行 ==="
+            grep -n -E "error:|Error:|FAILED|failed|No signing|No profile|requires a development team|Command .* failed" "$LOG" | head -40
+            echo "FLUTTER_FAILED=1" >> "$GITHUB_ENV"
+            echo "::warning::flutter build 失败，改用直接 xcodebuild 兜底"
+          fi
+          exit 0
+
+      - name: 备用直接 xcodebuild
+        if: env.FLUTTER_FAILED == '1'
+        run: |
+          set +e
+          LOG="$GITHUB_WORKSPACE/xcodebuild.log"
+          cd app/ios
+          xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath "$GITHUB_WORKSPACE/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" CODE_SIGN_ENTITLEMENTS="" \
+            build > "$LOG" 2>&1
+          st=$?
+          echo "=== xcodebuild 末尾 40 行 ==="
+          tail -40 "$LOG"
+          echo "=== xcodebuild 错误行 ==="
+          grep -n -E "error:|Error:|FAILED|failed|No signing|No profile|\*\* BUILD" "$LOG" | head -40
+          echo "XCODE_STATUS=$st" >> "$GITHUB_ENV"
+          exit 0
 
       - name: 打包成 ipa
         run: |
-          APP=$(find app/build/ios -maxdepth 5 -type d -name 'Runner.app' -print -quit)
+          APP=$(find app/build/ios "$GITHUB_WORKSPACE/dd" -maxdepth 7 -type d -name 'Runner.app' -print -quit 2>/dev/null)
           test -n "$APP" || { echo "Runner.app not found"; exit 1; }
+          echo "找到 APP: $APP"
           mkdir -p stage/Payload
           cp -R "$APP" stage/Payload/
           (cd stage && zip -qry "$GITHUB_WORKSPACE/DSH-Go-unsigned.ipa" Payload)
+          ls -lh "$GITHUB_WORKSPACE/DSH-Go-unsigned.ipa"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: DSH-Go-unsigned-ipa
           path: DSH-Go-unsigned.ipa
+          if-no-files-found: warn
           retention-days: 14
+
+      - name: 上传编译诊断日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-diagnostics
+          path: |
+            ios-build.log
+            xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   dshios:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_dshios }}
